@@ -10,10 +10,10 @@
   "capabilities": [
     "home",
     "catalogs",
+    "discover",
     "meta",
     "streams",
-    "search",
-    "discover"
+    "search"
   ],
   "languages": [
     "es",
