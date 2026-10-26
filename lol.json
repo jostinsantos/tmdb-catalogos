@@ -32,13 +32,16 @@
       "label": "Secciones visibles",
       "type": "select",
       "description": "Elige las secciones (sesiones) que quieres ver en Home. Separa por coma si es texto.",
-      "default": "Discover,Franchises,Genres,Decades,Directors",
+      "default": "Discover,Franchises,Genres Movies,Genres TV,Decades,Directors,Productoras,Premios",
       "options": [
         "Discover",
         "Franchises",
-        "Genres",
+        "Genres Movies",
+        "Genres TV",
         "Decades",
-        "Directors"
+        "Directors",
+        "Productoras",
+        "Premios"
       ]
     },
     {
