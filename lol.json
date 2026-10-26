@@ -12,7 +12,8 @@
     "catalogs",
     "meta",
     "streams",
-    "search"
+    "search",
+    "discover"
   ],
   "languages": [
     "es",
