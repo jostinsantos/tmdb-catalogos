@@ -79,12 +79,15 @@ function mapTmdbItem(item, typeHint) {
   var isTv = typeHint === 'tv' || typeHint === 'series' ||
     item.media_type === 'tv' ||
     (!!item.first_air_date && !item.release_date);
-  var type = isTv ? 'series' : 'movie';
+  var type = isTv ? 'tv' : 'movie';
+  var tid = String(item.id);
+  // id compuesto: la app solo manda un id a getMeta → type:tmdbId
+  var compositeId = type + ':' + tid;
   var title = item.title || item.name || item.original_title || item.original_name || 'Sin título';
   var year = ((item.release_date || item.first_air_date || '') + '').slice(0, 4) || null;
   return {
-    id: String(item.id),
-    tmdbId: String(item.id),
+    id: compositeId,
+    tmdbId: tid,
     imdbId: item.imdb_id || null,
     title: title,
     name: title,
@@ -100,6 +103,50 @@ function mapTmdbItem(item, typeHint) {
     year: year,
     genres: (item.genre_ids || []).map(String)
   };
+}
+
+/** Parsea id compuesto: "movie:123", "series:456", JSON, o solo número */
+function parseContentId(id) {
+  var raw = String(id || '').trim();
+  var tmdbId = raw;
+  var type = 'movie';
+  function normType(t) {
+    t = String(t || 'movie').toLowerCase();
+    if (t === 'series' || t === 'show' || t === 'tv') return 'tv';
+    return 'movie';
+  }
+
+  // JSON embebido
+  if (raw.charAt(0) === '{') {
+    try {
+      var j = JSON.parse(raw);
+      tmdbId = String(j.tmdbId || j.id || j.tmdb || raw);
+      type = (j.type === 'tv' || j.type === 'series' || j.media_type === 'tv' || j.media_type === 'series') ? 'tv' : 'movie';
+      type = normType(type); return { tmdbId: tmdbId, type: type, mediaType: type === 'tv' ? 'tv' : 'movie' };
+    } catch (e) {}
+  }
+
+  // type:id  o  type/id
+  var m = raw.match(/^(movie|series|tv|show)[:\/](\d+)$/i);
+  if (m) {
+    type = (m[1].toLowerCase() === 'movie') ? 'movie' : 'tv';
+    tmdbId = m[2];
+    type = normType(type); return { tmdbId: tmdbId, type: type, mediaType: type === 'tv' ? 'tv' : 'movie' };
+  }
+
+  // id:type
+  m = raw.match(/^(\d+)[:\/](movie|series|tv|show)$/i);
+  if (m) {
+    tmdbId = m[1];
+    type = (m[2].toLowerCase() === 'movie') ? 'movie' : 'tv';
+    type = normType(type); return { tmdbId: tmdbId, type: type, mediaType: type === 'tv' ? 'tv' : 'movie' };
+  }
+
+  // solo número o imdb
+  if (/^\d+$/.test(raw)) {
+    tmdbId = raw;
+  }
+  type = normType(type); return { tmdbId: tmdbId, type: type, mediaType: type === 'tv' ? 'tv' : 'movie', needsGuess: !/^\d+$/.test(raw) && raw.indexOf('tt') !== 0 };
 }
 
 function loadCatalogs() {
@@ -251,6 +298,38 @@ function resolveTmdbQuery(title, sectionTitle, preferType) {
 async function getCatalog(catalogId, opts) {
   opts = opts || {};
   var page = 1;
+  var cid0 = String(catalogId || '').trim();
+
+  // Si es una sesión → listar sus catálogos
+  if (cid0.indexOf('section:') === 0 || cid0.indexOf('section/') === 0) {
+    var secKey = cid0.replace(/^section[:\/]/i, '');
+    var sections = loadCatalogs();
+    var items = [];
+    for (var i = 0; i < sections.length; i++) {
+      var sec = sections[i];
+      if (String(sec.id) === secKey || String(sec.title) === secKey ||
+          String(sec.id).toLowerCase() === secKey.toLowerCase() ||
+          String(sec.title).toLowerCase() === secKey.toLowerCase()) {
+        var folders = sec.folders || [];
+        for (var j = 0; j < folders.length; j++) {
+          var folder = folders[j];
+          items.push({
+            id: String(folder.id || folder.title),
+            title: folder.title,
+            name: folder.title,
+            type: 'catalog',
+            poster: folder.cover || null,
+            backdrop: folder.cover || null,
+            overview: 'Catálogo de ' + (sec.title || ''),
+            catalogId: String(folder.id || folder.title)
+          });
+        }
+        break;
+      }
+    }
+    return { items: items, metas: items, results: items, page: 1, totalPages: 1, hasMore: false };
+  }
+
   if (typeof opts === 'object') {
     page = parseInt(opts.page || opts.skip || 1, 10) || 1;
   } else if (typeof opts === 'number') {
@@ -308,42 +387,113 @@ async function getCatalog(catalogId, opts) {
 }
 
 // ─── getDiscover (pestaña Descubrir — OBLIGATORIO) ─────────────────────────
+
 async function getDiscover(opts) {
   opts = opts || {};
   var page = parseInt(opts.page || 1, 10) || 1;
-  var filter = (opts.filter || opts.genre || opts.type || '').toString().toLowerCase();
+  var filter = (opts.filter || opts.genre || opts.type || opts.catalog || '').toString().trim();
 
-  var path = '/trending/all/week';
-  var params = { page: String(page) };
-
-  if (filter === 'movie' || filter === 'movies' || filter === 'peliculas' || filter === 'películas') {
-    path = '/movie/popular';
-  } else if (filter === 'tv' || filter === 'series' || filter === 'show') {
-    path = '/tv/popular';
-  } else if (GENRE_MAP[filter]) {
-    path = '/discover/movie';
-    params.with_genres = String(GENRE_MAP[filter]);
-    params.sort_by = 'popularity.desc';
+  // Si el filtro es un catalogId concreto → devolver contenido de ese catálogo
+  if (filter && filter !== 'all' && filter !== 'todo') {
+    var asCatalog = await getCatalog(filter, { page: page });
+    if (asCatalog && asCatalog.items && asCatalog.items.length) {
+      return asCatalog;
+    }
+    // género TMDB
+    var fl = filter.toLowerCase();
+    if (fl === 'movie' || fl === 'movies' || fl === 'peliculas' || fl === 'películas') {
+      var dataM = await tmdbFetch('/movie/popular', { page: String(page) });
+      var itemsM = (dataM.results || []).map(function (r) { return mapTmdbItem(r, 'movie'); });
+      return { items: itemsM, metas: itemsM, results: itemsM, page: dataM.page || page, totalPages: dataM.total_pages || 1, hasMore: (dataM.page || page) < (dataM.total_pages || 1) };
+    }
+    if (fl === 'tv' || fl === 'series' || fl === 'show') {
+      var dataT = await tmdbFetch('/tv/popular', { page: String(page) });
+      var itemsT = (dataT.results || []).map(function (r) { return mapTmdbItem(r, 'tv'); });
+      return { items: itemsT, metas: itemsT, results: itemsT, page: dataT.page || page, totalPages: dataT.total_pages || 1, hasMore: (dataT.page || page) < (dataT.total_pages || 1) };
+    }
+    if (GENRE_MAP[fl]) {
+      var dataG = await tmdbFetch('/discover/movie', { page: String(page), with_genres: String(GENRE_MAP[fl]), sort_by: 'popularity.desc' });
+      var itemsG = (dataG.results || []).map(function (r) { return mapTmdbItem(r, 'movie'); });
+      return { items: itemsG, metas: itemsG, results: itemsG, page: dataG.page || page, totalPages: dataG.total_pages || 1, hasMore: (dataG.page || page) < (dataG.total_pages || 1) };
+    }
   }
 
-  try {
-    var data = await tmdbFetch(path, params);
-    var results = (data.results || []).map(function (r) {
-      return mapTmdbItem(r, r.media_type);
-    });
-    if (!results.length) {
-      data = await tmdbFetch('/movie/popular', { page: String(page) });
-      results = (data.results || []).map(function (r) { return mapTmdbItem(r, 'movie'); });
+  // Sin filtro / página 1: listar SESIONES y luego CATÁLOGOS de cada sesión
+  // (la app muestra esto en Descubrir como lista seleccionable)
+  if (page === 1 && (!filter || filter === 'all' || filter === 'todo')) {
+    var sections = loadCatalogs();
+    var enabled = enabledSections();
+    var hidden = hiddenCatalogs();
+    var items = [];
+
+    // Primero: sesiones (type catalog-section)
+    for (var i = 0; i < sections.length; i++) {
+      var sec = sections[i];
+      var st = (sec.title || '').toLowerCase();
+      if (enabled.length && enabled.indexOf(st) === -1) continue;
+      items.push({
+        id: 'section:' + String(sec.id || sec.title),
+        title: '📁 ' + sec.title,
+        name: sec.title,
+        type: 'catalog',
+        overview: 'Sesión: ' + (sec.folders || []).length + ' catálogos',
+        description: 'Sesión con ' + (sec.folders || []).length + ' catálogos',
+        poster: null,
+        catalogId: String(sec.id || sec.title)
+      });
     }
-    var totalPages = data.total_pages || 1;
-    var curPage = data.page || page;
+
+    // Segundo: todos los catálogos de cada sesión
+    for (var i = 0; i < sections.length; i++) {
+      var sec = sections[i];
+      var st = (sec.title || '').toLowerCase();
+      if (enabled.length && enabled.indexOf(st) === -1) continue;
+      var folders = sec.folders || [];
+      for (var j = 0; j < folders.length; j++) {
+        var folder = folders[j];
+        var t = (folder.title || '').toLowerCase();
+        var id = (folder.id || '').toLowerCase();
+        var skip = false;
+        for (var h = 0; h < hidden.length; h++) {
+          if (t.indexOf(hidden[h]) !== -1 || id.indexOf(hidden[h]) !== -1) { skip = true; break; }
+        }
+        if (skip) continue;
+        var catId = String(folder.id || folder.title);
+        items.push({
+          id: catId,
+          title: (sec.title || '') + ' › ' + folder.title,
+          name: folder.title,
+          type: 'catalog',
+          overview: 'Catálogo de ' + (sec.title || ''),
+          description: 'Catálogo de ' + (sec.title || ''),
+          poster: folder.cover || null,
+          backdrop: folder.cover || null,
+          catalogId: catId
+        });
+      }
+    }
+
+    return {
+      items: items,
+      metas: items,
+      results: items,
+      page: 1,
+      totalPages: 1,
+      hasMore: false
+    };
+  }
+
+  // Fallback trending
+  try {
+    var data = await tmdbFetch('/trending/all/week', { page: String(page) });
+    var results = (data.results || []).map(function (r) { return mapTmdbItem(r, r.media_type); });
     return {
       items: results,
       metas: results,
       results: results,
-      page: curPage,
-      totalPages: totalPages,
-      hasMore: curPage < totalPages
+      page: data.page || page,
+      totalPages: data.total_pages || 1,
+      hasMore: (data.page || page) < (data.total_pages || 1)
     };
   } catch (e) {
     return { items: [], metas: [], results: [], page: page, totalPages: 1, hasMore: false, error: String(e) };
@@ -351,18 +501,47 @@ async function getDiscover(opts) {
 }
 
 async function getDiscoverFilters() {
-  return [
-    { id: 'all', title: 'Todo' },
-    { id: 'movie', title: 'Películas' },
-    { id: 'tv', title: 'Series' },
-    { id: 'action', title: 'Acción' },
-    { id: 'comedy', title: 'Comedia' },
-    { id: 'horror', title: 'Terror' },
-    { id: 'drama', title: 'Drama' },
-    { id: 'romance', title: 'Romance' },
-    { id: 'thriller', title: 'Suspense' },
-    { id: 'animation', title: 'Animación' }
+  var filters = [
+    { id: 'all', title: '— Sesiones y catálogos —' },
+    { id: 'movie', title: 'Películas populares' },
+    { id: 'tv', title: 'Series populares' }
   ];
+  var sections = loadCatalogs();
+  var enabled = enabledSections();
+  var hidden = hiddenCatalogs();
+
+  // Primero sesiones
+  for (var i = 0; i < sections.length; i++) {
+    var sec = sections[i];
+    var st = (sec.title || '').toLowerCase();
+    if (enabled.length && enabled.indexOf(st) === -1) continue;
+    filters.push({
+      id: String(sec.id || sec.title),
+      title: '📁 ' + sec.title
+    });
+  }
+  // Luego catálogos de cada sesión
+  for (var i = 0; i < sections.length; i++) {
+    var sec = sections[i];
+    var st = (sec.title || '').toLowerCase();
+    if (enabled.length && enabled.indexOf(st) === -1) continue;
+    var folders = sec.folders || [];
+    for (var j = 0; j < folders.length; j++) {
+      var folder = folders[j];
+      var t = (folder.title || '').toLowerCase();
+      var id = (folder.id || '').toLowerCase();
+      var skip = false;
+      for (var h = 0; h < hidden.length; h++) {
+        if (t.indexOf(hidden[h]) !== -1 || id.indexOf(hidden[h]) !== -1) { skip = true; break; }
+      }
+      if (skip) continue;
+      filters.push({
+        id: String(folder.id || folder.title),
+        title: (sec.title || '') + ' › ' + folder.title
+      });
+    }
+  }
+  return filters;
 }
 
 // ─── getMeta ───────────────────────────────────────────────────────────────
@@ -385,22 +564,51 @@ async function omdbToTmdb(imdbId) {
   return null;
 }
 
-async function getMeta(id, type) {
-  var tmdbId = id;
-  var mediaType = (type === 'series' || type === 'tv' || type === 'show') ? 'tv' : 'movie';
 
-  if (String(id).indexOf('tt') === 0 || (!/^\d+$/.test(String(id)) && String(id).length > 5)) {
-    var conv = await omdbToTmdb(id);
+async function getMeta(id, type) {
+  var parsed = parseContentId(id);
+  var tmdbId = parsed.tmdbId;
+  var mediaType = parsed.mediaType; // 'tv' | 'movie'
+
+  // Si el caller pasó type explícito, priorizarlo
+  if (type === 'series' || type === 'tv' || type === 'show') mediaType = 'tv';
+  else if (type === 'movie') mediaType = 'movie';
+
+  // IMDb
+  if (String(tmdbId).indexOf('tt') === 0 || (parsed.needsGuess && String(id).indexOf('tt') === 0)) {
+    var conv = await omdbToTmdb(String(id).indexOf('tt') === 0 ? id : tmdbId);
     if (conv) {
       tmdbId = conv.tmdbId;
       mediaType = conv.type === 'tv' ? 'tv' : 'movie';
     }
   }
 
-  try {
-    var data = await tmdbFetch('/' + mediaType + '/' + tmdbId, {
+  async function fetchMeta(mt) {
+    return tmdbFetch('/' + mt + '/' + tmdbId, {
       append_to_response: 'credits,external_ids,videos,images,recommendations'
     });
+  }
+
+  var data = null;
+  try {
+    data = await fetchMeta(mediaType);
+  } catch (e1) {
+    // 404 u otro error → probar el tipo contrario
+    var other = mediaType === 'tv' ? 'movie' : 'tv';
+    try {
+      data = await fetchMeta(other);
+      mediaType = other;
+    } catch (e2) {
+      return {
+        id: String(id),
+        title: 'No encontrado',
+        overview: 'TMDB no encontró este id (' + tmdbId + ') como movie ni series. ' + String(e1),
+        type: mediaType === 'tv' ? 'tv' : 'movie'
+      };
+    }
+  }
+
+  try {
     var isTv = mediaType === 'tv';
     var title = data.title || data.name || 'Sin título';
     var year = ((data.release_date || data.first_air_date || '') + '').slice(0, 4);
@@ -448,6 +656,7 @@ async function getMeta(id, type) {
             return {
               episode: ep.episode_number,
               number: ep.episode_number,
+              id: 'tv:' + tmdbId + ':s' + sObj.season + 'e' + ep.episode_number,
               title: ep.name || ('Episodio ' + ep.episode_number),
               name: ep.name || ('Episodio ' + ep.episode_number),
               overview: ep.overview || '',
@@ -463,8 +672,9 @@ async function getMeta(id, type) {
       }));
     }
 
+    var outType = isTv ? 'tv' : 'movie';
     return {
-      id: String(tmdbId),
+      id: outType + ':' + String(tmdbId),
       tmdbId: String(tmdbId),
       imdbId: imdb,
       title: title,
@@ -474,7 +684,8 @@ async function getMeta(id, type) {
       logo: logo,
       overview: data.overview || '',
       description: data.overview || '',
-      type: isTv ? 'series' : 'movie',
+      type: outType,
+      media_type: outType,
       rating: data.vote_average,
       year: year,
       genres: genres,
@@ -484,7 +695,7 @@ async function getMeta(id, type) {
       extra: { tagline: data.tagline, logo: logo }
     };
   } catch (e) {
-    return { id: String(id), title: 'Error', overview: String(e), type: mediaType === 'tv' ? 'series' : 'movie' };
+    return { id: String(id), title: 'Error', overview: String(e), type: mediaType === 'tv' ? 'tv' : 'movie' };
   }
 }
 
@@ -672,9 +883,12 @@ async function runWithConcurrency(tasks, limit) {
 }
 
 async function getStreams(id, type, season, episode) {
-  var tmdbId = id;
+  var parsed = parseContentId(id);
+  var tmdbId = parsed.tmdbId;
   var imdbId = null;
-  var mediaType = (type === 'series' || type === 'tv' || type === 'show') ? 'tv' : 'movie';
+  var mediaType = parsed.mediaType;
+  if (type === 'series' || type === 'tv' || type === 'show') mediaType = 'tv';
+  else if (type === 'movie') mediaType = 'movie';
 
   if (String(id).indexOf('tt') === 0) {
     var conv = await omdbToTmdb(id);
