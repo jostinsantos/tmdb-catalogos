@@ -10,10 +10,8 @@
   "capabilities": [
     "home",
     "catalogs",
-    "discover",
     "meta",
-    "streams",
-    "search"
+    "streams"
   ],
   "languages": [
     "es",
@@ -21,7 +19,7 @@
   ],
   "tabs": [
     "home",
-    "discover",
+    "",
     "search",
     "library",
     "settings"
