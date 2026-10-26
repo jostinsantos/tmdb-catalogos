@@ -147,14 +147,18 @@ function findFolder(catalogId) {
 }
 
 // ─── Home: solo lista de catálogos por sesión ──────────────────────────────
+
 async function getHome() {
   var sections = loadCatalogs();
   var enabled = enabledSections();
   var hidden = hiddenCatalogs();
+  var skipSections = { 'streaming services': true, 'streaming': true };
   var rows = [];
   for (var i = 0; i < sections.length; i++) {
     var sec = sections[i];
-    var st = (sec.title || '').toLowerCase();
+    var stitle = (sec.title || '').replace(/\u200e/g, '').trim();
+    var st = stitle.toLowerCase();
+    if (skipSections[st]) continue;
     if (enabled.length && enabled.indexOf(st) === -1) continue;
     var items = [];
     var folders = sec.folders || [];
@@ -180,7 +184,7 @@ async function getHome() {
       });
     }
     if (items.length) {
-      rows.push({ id: String(sec.id || sec.title), title: sec.title, type: 'row', imageStyle: 'backdrop', items: items });
+      rows.push({ id: String(sec.id || stitle), title: stitle, type: 'row', imageStyle: 'backdrop', items: items });
     }
   }
   return { rows: rows };
@@ -197,143 +201,263 @@ async function getCatalogs() {
   return { catalogs: list };
 }
 
-/**
- * Resuelve un catalogId del JSON a resultados reales.
- * - tmdb.discover.* → TMDB discover/trending
- * - flixpatrol / streaming + netflix/prime → with_watch_providers
- * - trakt.list.ID → API Trakt
- * - géneros / décadas por título del folder
- */
-async function fetchFromCatalogId(catalogId, mediaType, page, folderTitle) {
-  catalogId = String(catalogId || '');
-  mediaType = mediaType === 'series' || mediaType === 'tv' ? 'tv' : 'movie';
-  page = String(page || 1);
-  var title = (folderTitle || '').toLowerCase();
-  var cid = catalogId.toLowerCase();
 
-  // TMDB discover / trending embebido en el id
-  if (cid.indexOf('tmdb.discover') === 0 || cid.indexOf('tmdb.') === 0) {
-    if (cid.indexOf('trending') !== -1) {
-      var path = '/trending/' + (cid.indexOf('series') !== -1 || cid.indexOf('tv') !== -1 || mediaType === 'tv' ? 'tv' : 'movie') + '/week';
-      var data = await tmdbFetch(path, { page: page });
-      return (data.results || []).map(function (r) { return mapTmdbItem(r, mediaType); });
+// Colecciones TMDB conocidas (franquicias)
+var FRANCHISE_COLLECTIONS = {
+  'star wars': 10,
+  'middle earth': 119,
+  'the lord of the rings': 119,
+  'the hobbit': 121938,
+  'the wizarding world': 1241,
+  'harry potter': 1241,
+  'marvel': 0, // special: search
+  'fast': 9485,
+  'fast & furious': 9485,
+  'mission impossible': 87359,
+  'john wick': 563526,
+  'jurassic': 328,
+  'jurassic park': 328,
+  'alien': 8091,
+  'predator': 1970,
+  'terminator': 528,
+  'matrix': 2344,
+  'avatar': 87096,
+  'indiana jones': 84,
+  'james bond': 645,
+  'bond': 645,
+  'batman': 263,
+  'superman': 8537,
+  'spider-man': 556,
+  'spiderman': 556,
+  'x-men': 748,
+  'transformers': 179065,
+  'pirates of the caribbean': 295,
+  'toy story': 10194,
+  'frozen': 386382,
+  'shrek': 2150,
+  'despicable me': 86066,
+  'kung fu panda': 77816,
+  'how to train your dragon': 89137
+};
+
+var DIRECTOR_IDS = {
+  'wes anderson': 5655,
+  'danny boyle': 20323,
+  'tim burton': 510,
+  'james cameron': 2710,
+  'coen brothers': 1223, // joel coen as primary
+  'coen': 1223,
+  'ron howard': 6159,
+  'stanley kubrick': 240,
+  'christopher nolan': 525,
+  'martin scorsese': 1032,
+  'ridley scott': 578,
+  'm. night shyamalan': 11614,
+  'm night shyamalan': 11614,
+  'steven spielberg': 488,
+  'oliver stone': 1152,
+  'quentin tarantino': 138
+};
+
+/**
+ * Contenido REAL según el catálogo (título + sources del JSON).
+ */
+async function fetchCatalogContent(folder, page) {
+  page = String(page || 1);
+  var title = (folder.title || '').toLowerCase().trim();
+  var section = '';
+  // section se pasa opcionalmente
+  var sources = folder.sources || [];
+  var preferTv = false;
+  var preferMovie = false;
+  for (var i = 0; i < sources.length; i++) {
+    if (sources[i].type === 'series' || sources[i].type === 'tv') preferTv = true;
+    if (sources[i].type === 'movie') preferMovie = true;
+  }
+
+  // ── DISCOVER / TRENDING / POPULAR ──
+  if (/trending\s*show|trending\s*tv|shows?\s*trending/i.test(title) || title === 'trending shows') {
+    var d = await tmdbFetch('/trending/tv/week', { page: page });
+    return (d.results || []).map(function (r) { return mapTmdbItem(r, 'tv'); });
+  }
+  if (/trending\s*movie/i.test(title) || title === 'trending movies') {
+    var d = await tmdbFetch('/trending/movie/week', { page: page });
+    return (d.results || []).map(function (r) { return mapTmdbItem(r, 'movie'); });
+  }
+  if (/popular\s*show/i.test(title) || title === 'popular shows') {
+    var d = await tmdbFetch('/tv/popular', { page: page });
+    return (d.results || []).map(function (r) { return mapTmdbItem(r, 'tv'); });
+  }
+  if (/popular\s*movie/i.test(title) || title === 'popular movies') {
+    var d = await tmdbFetch('/movie/popular', { page: page });
+    return (d.results || []).map(function (r) { return mapTmdbItem(r, 'movie'); });
+  }
+  if (/top\s*rated\s*show|best\s*rated\s*show/i.test(title)) {
+    var d = await tmdbFetch('/tv/top_rated', { page: page });
+    return (d.results || []).map(function (r) { return mapTmdbItem(r, 'tv'); });
+  }
+  if (/top\s*rated\s*movie|best\s*rated\s*movie/i.test(title)) {
+    var d = await tmdbFetch('/movie/top_rated', { page: page });
+    return (d.results || []).map(function (r) { return mapTmdbItem(r, 'movie'); });
+  }
+  if (/now\s*playing|en\s*cartelera/i.test(title)) {
+    var d = await tmdbFetch('/movie/now_playing', { page: page });
+    return (d.results || []).map(function (r) { return mapTmdbItem(r, 'movie'); });
+  }
+  if (/upcoming|próximamente|proximamente/i.test(title)) {
+    var d = await tmdbFetch('/movie/upcoming', { page: page });
+    return (d.results || []).map(function (r) { return mapTmdbItem(r, 'movie'); });
+  }
+  if (/airing|on\s*the\s*air|al\s*aire/i.test(title)) {
+    var d = await tmdbFetch('/tv/on_the_air', { page: page });
+    return (d.results || []).map(function (r) { return mapTmdbItem(r, 'tv'); });
+  }
+  if (/trending/i.test(title) && !/movie|show|tv/i.test(title)) {
+    var d = await tmdbFetch('/trending/all/week', { page: page });
+    return (d.results || []).map(function (r) { return mapTmdbItem(r, r.media_type); });
+  }
+
+  // ── FRANQUICIAS → collection TMDB ──
+  var collectionId = null;
+  for (var fname in FRANCHISE_COLLECTIONS) {
+    if (title.indexOf(fname) !== -1 || fname.indexOf(title) !== -1) {
+      collectionId = FRANCHISE_COLLECTIONS[fname];
+      break;
     }
-    if (cid.indexOf('decades') !== -1 || /1980|1990|2000|2010|2020/.test(cid + title)) {
-      var y = 2010;
-      var dm = (cid + title).match(/(1980|1990|2000|2010|2020)/);
-      if (dm) y = parseInt(dm[1], 10);
-      var data2 = await tmdbFetch('/discover/movie', {
+  }
+  if (collectionId === 0 && /marvel/i.test(title)) {
+    // Marvel: buscar colección o discover keyword
+    try {
+      var sc = await tmdbFetch('/search/collection', { query: 'Marvel' });
+      if (sc.results && sc.results[0]) collectionId = sc.results[0].id;
+    } catch (e) {}
+  }
+  if (!collectionId && folder._section === 'Franchises') {
+    try {
+      var sc2 = await tmdbFetch('/search/collection', { query: folder.title });
+      if (sc2.results && sc2.results[0]) collectionId = sc2.results[0].id;
+    } catch (e) {}
+  }
+  if (collectionId) {
+    try {
+      var col = await tmdbFetch('/collection/' + collectionId);
+      var parts = col.parts || [];
+      // paginar manual
+      var start = (parseInt(page, 10) - 1) * 20;
+      var slice = parts.slice(start, start + 20);
+      return slice.map(function (r) { return mapTmdbItem(r, 'movie'); });
+    } catch (e) {}
+  }
+
+  // ── DIRECTORES → person id + credits ──
+  var personId = null;
+  for (var dname in DIRECTOR_IDS) {
+    if (title.indexOf(dname) !== -1 || dname.indexOf(title) !== -1) {
+      personId = DIRECTOR_IDS[dname];
+      break;
+    }
+  }
+  if (!personId && folder._section === 'Directors') {
+    try {
+      var sp = await tmdbFetch('/search/person', { query: folder.title });
+      if (sp.results && sp.results[0]) personId = sp.results[0].id;
+    } catch (e) {}
+  }
+  if (personId) {
+    try {
+      var credits = await tmdbFetch('/person/' + personId + '/combined_credits');
+      var crew = credits.crew || [];
+      var directed = crew.filter(function (c) {
+        return (c.job === 'Director' || c.job === 'director');
+      });
+      // unique by id
+      var seen = {};
+      var list = [];
+      for (var i = 0; i < directed.length; i++) {
+        var c = directed[i];
+        if (seen[c.id]) continue;
+        seen[c.id] = true;
+        list.push(c);
+      }
+      // sort by popularity / date
+      list.sort(function (a, b) {
+        return (b.popularity || 0) - (a.popularity || 0);
+      });
+      var start = (parseInt(page, 10) - 1) * 20;
+      var slice = list.slice(start, start + 20);
+      return slice.map(function (r) {
+        return mapTmdbItem(r, r.media_type === 'tv' ? 'tv' : 'movie');
+      });
+    } catch (e) {}
+  }
+
+  // ── GÉNEROS ──
+  for (var g in GENRE_MAP) {
+    if (title === g || title.indexOf(g) !== -1) {
+      var gid = GENRE_MAP[g];
+      var items = [];
+      // movies
+      try {
+        var dm = await tmdbFetch('/discover/movie', { page: page, with_genres: String(gid), sort_by: 'popularity.desc' });
+        (dm.results || []).forEach(function (r) { items.push(mapTmdbItem(r, 'movie')); });
+      } catch (e) {}
+      // tv (si el catálogo no es solo movie por sources)
+      if (preferTv || !preferMovie) {
+        try {
+          var dt = await tmdbFetch('/discover/tv', { page: page, with_genres: String(gid), sort_by: 'popularity.desc' });
+          (dt.results || []).forEach(function (r) { items.push(mapTmdbItem(r, 'tv')); });
+        } catch (e) {}
+      }
+      return items;
+    }
+  }
+
+  // ── DÉCADAS: movie + tv ──
+  var dec = title.match(/(1980|1990|2000|2010|2020)s?/);
+  if (dec) {
+    var y = parseInt(dec[1], 10);
+    var items = [];
+    try {
+      var dm = await tmdbFetch('/discover/movie', {
         page: page,
         'primary_release_date.gte': y + '-01-01',
         'primary_release_date.lte': (y + 9) + '-12-31',
         sort_by: 'popularity.desc'
       });
-      return (data2.results || []).map(function (r) { return mapTmdbItem(r, 'movie'); });
-    }
-    // discover genérico
-    var pathD = mediaType === 'tv' ? '/discover/tv' : '/discover/movie';
-    var data3 = await tmdbFetch(pathD, { page: page, sort_by: 'popularity.desc' });
-    return (data3.results || []).map(function (r) { return mapTmdbItem(r, mediaType); });
-  }
-
-  // Watch providers (Netflix, Prime, etc.)
-  var providerId = null;
-  for (var name in WATCH_PROVIDERS) {
-    if (cid.indexOf(name.replace(/\+/g, '')) !== -1 || title.indexOf(name) !== -1 ||
-        cid.indexOf('nfx') !== -1 && name === 'netflix' ||
-        cid.indexOf('amp') !== -1 && name === 'prime') {
-      providerId = WATCH_PROVIDERS[name];
-      break;
-    }
-  }
-  if (cid.indexOf('flixpatrol') !== -1 || cid.indexOf('streaming.') !== -1 || providerId) {
-    if (!providerId) {
-      if (cid.indexOf('netflix') !== -1 || cid.indexOf('nfx') !== -1) providerId = 8;
-      else if (cid.indexOf('prime') !== -1 || cid.indexOf('amazon') !== -1 || cid.indexOf('amp') !== -1) providerId = 9;
-      else if (cid.indexOf('disney') !== -1) providerId = 337;
-      else if (cid.indexOf('hbo') !== -1 || cid.indexOf('max') !== -1) providerId = 1899;
-      else if (cid.indexOf('apple') !== -1) providerId = 350;
-      else if (cid.indexOf('paramount') !== -1) providerId = 531;
-    }
-    var pathW = mediaType === 'tv' ? '/discover/tv' : '/discover/movie';
-    var paramsW = { page: page, sort_by: 'popularity.desc', watch_region: 'MX' };
-    if (providerId) {
-      paramsW.with_watch_providers = String(providerId);
-      paramsW.watch_region = 'MX';
-    }
-    var dataW = await tmdbFetch(pathW, paramsW);
-    return (dataW.results || []).map(function (r) { return mapTmdbItem(r, mediaType); });
-  }
-
-  // Trakt list
-  var traktMatch = cid.match(/trakt\.list\.(\d+)/);
-  if (traktMatch) {
-    try {
-      var listId = traktMatch[1];
-      var res = await fetch('https://api.trakt.tv/lists/' + listId + '/items/movie,show?extended=full&page=' + page + '&limit=20', {
-        headers: {
-          'Content-Type': 'application/json',
-          'trakt-api-version': '2',
-          'trakt-api-key': 'a1045d11d3f5c8a1e2e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0' // placeholder - may fail
-        }
-      });
-      // Without valid trakt client id this fails — fallback below
-      if (res.ok) {
-        var arr = await res.json();
-        var out = [];
-        for (var i = 0; i < arr.length; i++) {
-          var it = arr[i];
-          var mov = it.movie || it.show;
-          if (!mov || !mov.ids || !mov.ids.tmdb) continue;
-          var mt = it.movie ? 'movie' : 'tv';
-          out.push(mapTmdbItem({
-            id: mov.ids.tmdb,
-            title: mov.title,
-            name: mov.title,
-            overview: mov.overview,
-            release_date: mov.year ? (mov.year + '-01-01') : null,
-            first_air_date: !it.movie && mov.year ? (mov.year + '-01-01') : null,
-            vote_average: mov.rating,
-            poster_path: null
-          }, mt));
-        }
-        // enrich posters from TMDB
-        for (var j = 0; j < out.length; j++) {
-          try {
-            var meta = await tmdbFetch('/' + out[j].type + '/' + out[j].tmdbId);
-            out[j].poster = posterUrl(meta.poster_path);
-            out[j].backdrop = backdropUrl(meta.backdrop_path);
-            out[j].overview = meta.overview || out[j].overview;
-          } catch (e) {}
-        }
-        if (out.length) return out;
-      }
+      (dm.results || []).forEach(function (r) { items.push(mapTmdbItem(r, 'movie')); });
     } catch (e) {}
+    try {
+      var dt = await tmdbFetch('/discover/tv', {
+        page: page,
+        'first_air_date.gte': y + '-01-01',
+        'first_air_date.lte': (y + 9) + '-12-31',
+        sort_by: 'popularity.desc'
+      });
+      (dt.results || []).forEach(function (r) { items.push(mapTmdbItem(r, 'tv')); });
+    } catch (e) {}
+    return items;
   }
 
-  // Género por título del folder
-  for (var g in GENRE_MAP) {
-    if (title.indexOf(g) !== -1 || cid.indexOf(g.replace(/\s/g, '_')) !== -1) {
-      var pathG = mediaType === 'tv' ? '/discover/tv' : '/discover/movie';
-      var dataG = await tmdbFetch(pathG, { page: page, with_genres: String(GENRE_MAP[g]), sort_by: 'popularity.desc' });
-      return (dataG.results || []).map(function (r) { return mapTmdbItem(r, mediaType); });
+  // ── Sources del JSON (tmdb.discover explícito) ──
+  for (var s = 0; s < sources.length; s++) {
+    var cid = String(sources[s].catalogId || '').toLowerCase();
+    var mt = (sources[s].type === 'series' || sources[s].type === 'tv') ? 'tv' : 'movie';
+    if (cid.indexOf('tmdb.discover') !== -1 || cid.indexOf('trending') !== -1) {
+      if (cid.indexOf('trending') !== -1) {
+        var path = '/trending/' + (mt === 'tv' || cid.indexOf('series') !== -1 ? 'tv' : 'movie') + '/week';
+        var d = await tmdbFetch(path, { page: page });
+        return (d.results || []).map(function (r) { return mapTmdbItem(r, mt); });
+      }
+      var path2 = mt === 'tv' ? '/discover/tv' : '/discover/movie';
+      var d2 = await tmdbFetch(path2, { page: page, sort_by: 'popularity.desc' });
+      return (d2.results || []).map(function (r) { return mapTmdbItem(r, mt); });
     }
   }
 
-  // Década por título
-  var dec = title.match(/(1980|1990|2000|2010|2020)/);
-  if (dec) {
-    var yy = parseInt(dec[1], 10);
-    var dataD = await tmdbFetch('/discover/movie', {
-      page: page,
-      'primary_release_date.gte': yy + '-01-01',
-      'primary_release_date.lte': (yy + 9) + '-12-31',
-      sort_by: 'popularity.desc'
-    });
-    return (dataD.results || []).map(function (r) { return mapTmdbItem(r, 'movie'); });
-  }
-
-  return null; // sin match
+  // Fallback mínimo: popular del tipo preferido
+  var fb = preferTv && !preferMovie ? '/tv/popular' : '/movie/popular';
+  var df = await tmdbFetch(fb, { page: page });
+  return (df.results || []).map(function (r) { return mapTmdbItem(r, preferTv && !preferMovie ? 'tv' : 'movie'); });
 }
 
 async function getCatalog(catalogId, opts) {
@@ -341,16 +465,17 @@ async function getCatalog(catalogId, opts) {
   var page = parseInt(opts.page || 1, 10) || 1;
   var cid = String(catalogId || '').trim();
 
-  // Sesión → listar catálogos de esa sesión
+  // Sesión → catálogos de esa sesión
   if (cid.indexOf('section:') === 0 || cid.indexOf('section/') === 0) {
     var secKey = cid.replace(/^section[:\/]/i, '');
     var sections = loadCatalogs();
     var items = [];
     for (var i = 0; i < sections.length; i++) {
       var sec = sections[i];
-      if (String(sec.id) === secKey || String(sec.title) === secKey ||
+      var stitle = (sec.title || '').replace(/\u200e/g, '').trim();
+      if (String(sec.id) === secKey || stitle === secKey ||
           String(sec.id).toLowerCase() === secKey.toLowerCase() ||
-          String(sec.title).toLowerCase() === secKey.toLowerCase()) {
+          stitle.toLowerCase() === secKey.toLowerCase()) {
         (sec.folders || []).forEach(function (folder) {
           items.push({
             id: String(folder.id || folder.title),
@@ -371,45 +496,15 @@ async function getCatalog(catalogId, opts) {
   var found = findFolder(cid);
   var folder = found.folder;
   if (!folder) {
-    return { items: [], metas: [], results: [], page: page, totalPages: 1, hasMore: false, error: 'Catálogo no encontrado: ' + cid };
+    return { items: [], metas: [], results: [], page: page, totalPages: 1, hasMore: false, error: 'Catálogo no encontrado' };
   }
+  folder._section = (found.sectionTitle || '').replace(/\u200e/g, '').trim();
 
-  var sources = folder.sources || [];
   var allItems = [];
-  var seen = {};
-
-  // Recorrer SOLO los sources del catálogo en el JSON
-  for (var s = 0; s < sources.length; s++) {
-    var src = sources[s];
-    var mediaType = (src.type === 'series' || src.type === 'tv') ? 'tv' : 'movie';
-    var catalogSrcId = src.catalogId || src.catalogName || '';
-    if (!catalogSrcId) continue;
-    try {
-      var batch = await fetchFromCatalogId(catalogSrcId, mediaType, page, folder.title);
-      if (batch && batch.length) {
-        for (var b = 0; b < batch.length; b++) {
-          var it = batch[b];
-          var key = it.id;
-          if (seen[key]) continue;
-          seen[key] = true;
-          allItems.push(it);
-        }
-      }
-    } catch (e) {}
-    // Limitar a ~40 ítems por página de catálogo
-    if (allItems.length >= 40) break;
-  }
-
-  // Si ningún source del JSON dio resultado, usar título del folder de forma acotada
-  if (!allItems.length) {
-    var preferType = 'movie';
-    for (var s2 = 0; s2 < sources.length; s2++) {
-      if (sources[s2].type === 'series' || sources[s2].type === 'tv') { preferType = 'tv'; break; }
-    }
-    try {
-      var batch2 = await fetchFromCatalogId(folder.title, preferType, page, folder.title);
-      if (batch2) allItems = batch2;
-    } catch (e) {}
+  try {
+    allItems = await fetchCatalogContent(folder, page) || [];
+  } catch (e) {
+    return { items: [], metas: [], results: [], page: page, totalPages: 1, hasMore: false, error: String(e) };
   }
 
   return {
@@ -424,79 +519,74 @@ async function getCatalog(catalogId, opts) {
   };
 }
 
-// Discover: sesiones luego catálogos
+/**
+ * Discover:
+ * - Filtros: sesiones (como home) y catálogos de cada sesión
+ * - Resultados: el mismo contenido que el catálogo individual
+ * No obliga a 3 selects; la app muestra los filtros que devolvemos.
+ */
 async function getDiscover(opts) {
   opts = opts || {};
   var page = parseInt(opts.page || 1, 10) || 1;
-  var filter = (opts.filter || opts.genre || opts.type || opts.catalog || '').toString().trim();
+  var filter = (opts.filter || opts.genre || opts.type || opts.catalog || opts.session || '').toString().trim();
 
+  // Si hay filtro de catálogo o sesión → contenido de ese catálogo / lista de catálogos
   if (filter && filter !== 'all' && filter !== 'todo') {
     return getCatalog(filter, { page: page });
   }
 
-  var sections = loadCatalogs();
-  var enabled = enabledSections();
-  var hidden = hiddenCatalogs();
-  var items = [];
-
-  for (var i = 0; i < sections.length; i++) {
-    var sec = sections[i];
-    var st = (sec.title || '').toLowerCase();
-    if (enabled.length && enabled.indexOf(st) === -1) continue;
-    items.push({
-      id: 'section:' + String(sec.id || sec.title),
-      title: '📁 ' + sec.title,
-      type: 'catalog',
-      overview: (sec.folders || []).length + ' catálogos',
-      catalogId: 'section:' + String(sec.id || sec.title)
-    });
-  }
-  for (var i = 0; i < sections.length; i++) {
-    var sec = sections[i];
-    var st = (sec.title || '').toLowerCase();
-    if (enabled.length && enabled.indexOf(st) === -1) continue;
-    (sec.folders || []).forEach(function (folder) {
-      var t = (folder.title || '').toLowerCase();
-      var id = (folder.id || '').toLowerCase();
-      for (var h = 0; h < hidden.length; h++) {
-        if (t.indexOf(hidden[h]) !== -1 || id.indexOf(hidden[h]) !== -1) return;
-      }
-      items.push({
-        id: String(folder.id || folder.title),
-        title: (sec.title || '') + ' › ' + folder.title,
-        type: 'catalog',
-        poster: folder.cover || null,
-        catalogId: String(folder.id || folder.title)
-      });
-    });
-  }
-  return { items: items, metas: items, results: items, page: 1, totalPages: 1, hasMore: false };
+  // Sin filtro: no mezclar resultados basura; devolver vacío de items
+  // (la UI debe usar filtros: sesión → catálogo → resultados)
+  return { items: [], metas: [], results: [], page: 1, totalPages: 1, hasMore: false };
 }
 
 async function getDiscoverFilters() {
-  var filters = [{ id: 'all', title: '— Sesiones y catálogos —' }];
+  // Sesiones primero, luego catálogos (sin Streaming)
+  var filters = [];
   var sections = loadCatalogs();
   var enabled = enabledSections();
   var hidden = hiddenCatalogs();
-  sections.forEach(function (sec) {
-    var st = (sec.title || '').toLowerCase();
-    if (enabled.length && enabled.indexOf(st) === -1) return;
-    filters.push({ id: 'section:' + String(sec.id || sec.title), title: '📁 ' + sec.title });
-  });
-  sections.forEach(function (sec) {
-    var st = (sec.title || '').toLowerCase();
-    if (enabled.length && enabled.indexOf(st) === -1) return;
+  var skipSections = { 'streaming services': true, 'streaming': true };
+
+  // Grupo 1: sesiones
+  for (var i = 0; i < sections.length; i++) {
+    var sec = sections[i];
+    var stitle = (sec.title || '').replace(/\u200e/g, '').trim();
+    var st = stitle.toLowerCase();
+    if (skipSections[st]) continue;
+    if (enabled.length && enabled.indexOf(st) === -1) continue;
+    filters.push({
+      id: 'section:' + String(sec.id || stitle),
+      title: stitle,
+      group: 'session'
+    });
+  }
+
+  // Grupo 2: catálogos por sesión
+  for (var i = 0; i < sections.length; i++) {
+    var sec = sections[i];
+    var stitle = (sec.title || '').replace(/\u200e/g, '').trim();
+    var st = stitle.toLowerCase();
+    if (skipSections[st]) continue;
+    if (enabled.length && enabled.indexOf(st) === -1) continue;
     (sec.folders || []).forEach(function (folder) {
       var t = (folder.title || '').toLowerCase();
       var id = (folder.id || '').toLowerCase();
       for (var h = 0; h < hidden.length; h++) {
         if (t.indexOf(hidden[h]) !== -1 || id.indexOf(hidden[h]) !== -1) return;
       }
-      filters.push({ id: String(folder.id || folder.title), title: (sec.title || '') + ' › ' + folder.title });
+      filters.push({
+        id: String(folder.id || folder.title),
+        title: folder.title,
+        group: stitle,
+        parent: 'section:' + String(sec.id || stitle)
+      });
     });
-  });
+  }
+
   return filters;
 }
+
 
 // ─── Meta: SOLO TMDB (+ OMDB imdb→tmdb) ────────────────────────────────────
 async function omdbToTmdb(imdbId) {
