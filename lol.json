@@ -3,9 +3,8 @@
   "name": "Catálogos Latino + Streams",
   "version": "1.0.0",
   "description": "Home con secciones de Streaming Services, Discover, Franchises, Genres, Decades, Directors. Contenido vía TMDB. Streams desde fuentes Latinuvio. Configura qué catálogos mostrar/ocultar.",
-  "author": "Usuario",
+  "author": "JostinSantos",
   "logo": "icon.png",
-  "banner": "https://image.tmdb.org/t/p/original/8Gxv8gSFCU0XGDykEjj7Yi4tcDX.jpg",
   "entry": "plugin.js",
   "capabilities": [
     "home",
