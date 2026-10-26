@@ -204,65 +204,105 @@ const GENRE_MAP = {
   'sci-fi': 878, 'thriller': 53, 'war': 10752, 'western': 37, 'anime': 16
 };
 
+
 async function getCatalog(catalogId, opts = {}) {
-  const page = (opts && opts.page) || 1;
+  const page = (opts && (opts.page || opts.skip)) ? (opts.page || 1) : 1;
   const sections = await loadCatalogs();
+
+  // Buscar el folder por id o por título (flexible)
   let folder = null;
   let sectionTitle = '';
+  const cid = String(catalogId || '').trim();
   for (const sec of sections) {
-    for (const f of sec.folders || []) {
-      if ((f.id || f.title) === catalogId || f.title === catalogId) {
+    for (const f of (sec.folders || [])) {
+      const fid = String(f.id || '').trim();
+      const ftitle = String(f.title || '').trim();
+      if (fid === cid || ftitle === cid || fid.toLowerCase() === cid.toLowerCase() || ftitle.toLowerCase() === cid.toLowerCase()) {
         folder = f;
-        sectionTitle = sec.title;
+        sectionTitle = sec.title || '';
         break;
       }
     }
     if (folder) break;
   }
 
-  // Heurística por título / section
-  const title = (folder && folder.title || catalogId || '').toLowerCase();
-  let path = '/trending/all/week';
-  let params = { page };
+  const title = ((folder && folder.title) || cid || '').toLowerCase();
+  const sources = (folder && folder.sources) || [];
+  // Preferir tipo del primer source si existe
+  let preferType = 'movie';
+  for (const s of sources) {
+    if (s.type === 'series' || s.type === 'tv') { preferType = 'tv'; break; }
+    if (s.type === 'movie') { preferType = 'movie'; break; }
+  }
 
-  if (title.includes('netflix') || title.includes('prime') || title.includes('disney') || title.includes('hbo') || title.includes('apple') || title.includes('paramount') || title.includes('hulu') || title.includes('max')) {
-    // Trending general como fallback (los catalogId reales de flixpatrol no son públicos aquí)
-    path = '/trending/movie/week';
-  } else if (title.includes('1980') || title.includes('1990') || title.includes('2000') || title.includes('2010') || title.includes('2020')) {
-    const decade = title.match(/(\d{4})/);
-    if (decade) {
-      const y = parseInt(decade[1], 10);
-      path = '/discover/movie';
-      params = { page, 'primary_release_date.gte': `${y}-01-01`, 'primary_release_date.lte': `${y + 9}-12-31`, sort_by: 'popularity.desc' };
-    }
-  } else if (GENRE_MAP[title] || Object.keys(GENRE_MAP).some(g => title.includes(g))) {
-    const gkey = Object.keys(GENRE_MAP).find(g => title.includes(g)) || title;
-    const gid = GENRE_MAP[gkey] || GENRE_MAP[title];
-    if (gid) {
-      path = '/discover/movie';
-      params = { page, with_genres: gid, sort_by: 'popularity.desc' };
-    }
-  } else if (title.includes('trending') || title.includes('popular') || sectionTitle.toLowerCase().includes('discover')) {
-    path = '/trending/all/week';
-  } else if (title.includes('war') || title.includes('western') || title.includes('thriller') || title.includes('sci-fi') || title.includes('space') || title.includes('romance')) {
+  let path = '/trending/all/week';
+  let params = { page: String(page) };
+
+  // --- Heurísticas fuertes para que SIEMPRE haya contenido ---
+  if (/netflix|prime|disney|hbo|apple|paramount|hulu|max|peacock|crunchyroll|star\+|mubi/.test(title)) {
+    path = preferType === 'tv' ? '/trending/tv/week' : '/trending/movie/week';
+  } else if (/1980|1990|2000|2010|2020/.test(title)) {
+    const m = title.match(/(1980|1990|2000|2010|2020)/);
+    const y = m ? parseInt(m[1], 10) : 2010;
+    path = '/discover/movie';
+    params = {
+      page: String(page),
+      'primary_release_date.gte': y + '-01-01',
+      'primary_release_date.lte': (y + 9) + '-12-31',
+      sort_by: 'popularity.desc'
+    };
+  } else if (Object.keys(GENRE_MAP).some(g => title.includes(g))) {
     const gkey = Object.keys(GENRE_MAP).find(g => title.includes(g));
-    if (gkey) {
-      path = '/discover/movie';
-      params = { page, with_genres: GENRE_MAP[gkey], sort_by: 'popularity.desc' };
-    }
+    const gid = GENRE_MAP[gkey];
+    path = preferType === 'tv' ? '/discover/tv' : '/discover/movie';
+    params = { page: String(page), with_genres: String(gid), sort_by: 'popularity.desc' };
+  } else if (/trending|popular|descubrir|discover|novedad/.test(title) || /discover/i.test(sectionTitle)) {
+    path = '/trending/all/week';
+  } else if (/director|wes anderson|nolan|spielberg|tarantino|scorsese|kubrick|cameron|burton|coen|boyle|howard|scott|shyamalan|stone/.test(title)) {
+    // Directores → películas populares (TMDB no filtra fácil por director sin credit search)
+    path = '/discover/movie';
+    params = { page: String(page), sort_by: 'popularity.desc', 'primary_release_date.gte': '1970-01-01' };
+  } else if (/franchise|star wars|marvel|dc|harry potter|middle earth|fast|mission impossible|john wick|jurassic|alien|predator|terminator|matrix|avatar/.test(title)) {
+    path = '/trending/all/week';
+  } else {
+    // Fallback seguro: siempre algo
+    path = preferType === 'tv' ? '/tv/popular' : '/movie/popular';
   }
 
   try {
     const data = await tmdbFetch(path, params);
-    const results = (data.results || []).map(r => mapTmdbItem(r));
+    let results = (data.results || []).map(r => mapTmdbItem(r, r.media_type || preferType));
+
+    // Si no hay resultados, segundo intento con popular
+    if (!results.length) {
+      const fallbackPath = preferType === 'tv' ? '/tv/popular' : '/movie/popular';
+      const data2 = await tmdbFetch(fallbackPath, { page: String(page) });
+      results = (data2.results || []).map(r => mapTmdbItem(r, preferType));
+    }
+
+    const totalPages = data.total_pages || 1;
+    const curPage = data.page || page;
+
+    // Formato que la app entiende (items + metas por compatibilidad)
     return {
       items: results,
-      page: data.page || page,
-      totalPages: data.total_pages || 1,
-      hasMore: (data.page || page) < (data.total_pages || 1)
+      metas: results,
+      results: results,
+      page: curPage,
+      totalPages: totalPages,
+      hasMore: curPage < totalPages,
+      catalogId: cid,
+      title: (folder && folder.title) || cid
     };
   } catch (e) {
-    return { items: [], page, totalPages: 1, hasMore: false, error: String(e) };
+    // Último recurso: trending
+    try {
+      const data = await tmdbFetch('/trending/all/week', { page: String(page) });
+      const results = (data.results || []).map(r => mapTmdbItem(r));
+      return { items: results, metas: results, page: page, totalPages: 1, hasMore: false, error: String(e) };
+    } catch (e2) {
+      return { items: [], metas: [], page: page, totalPages: 1, hasMore: false, error: String(e) };
+    }
   }
 }
 
